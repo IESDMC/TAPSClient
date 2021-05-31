@@ -43,8 +43,9 @@ from header import (DEFAULT_PARAMETERS, DEFAULT_USER_AGENT, FDSNWS,
 
 from urllib.parse import urlencode
 import urllib.request as urllib_request
+import urllib.error as urllib_error
 import queue
-
+import json
 
 DEFAULT_SERVICE_VERSIONS = {'dataselect': 0, 'station': 0}
 
@@ -85,7 +86,8 @@ class Client(object):
 
     def __init__(self, base_url="TAPS", major_versions=None, user=None,
                  password=None, user_agent=DEFAULT_USER_AGENT, debug=False,
-                 timeout=120, service_mappings=None):
+                 timeout=120, service_mappings=None, jwt_access_token=None,
+                 jwt_refresh_token=None):
         """
         Initializes an FDSN Web Service client.
         >>> client = Client("TAPS")
@@ -175,19 +177,139 @@ class Client(object):
 
         self.services = DEFAULT_SERVICES
 
+        self.jwt_access_token = jwt_access_token
+        self.jwt_refresh_token = jwt_refresh_token
+
+    def set_credentials(self, user, password):
+        """
+        Set user and password resulting in subsequent web service
+        requests for waveforms being authenticated for potential access to
+        restricted data.
+        This will overwrite any previously set-up credentials/authentication.
+        :type user: str
+        :param user: User name of credentials.
+        :type password: str
+        :param password: Password for given user name.
+        """
+        self.user = user
+        self._set_opener(user, password)
+
     def _set_opener(self, user, password):
         # Only add the authentication handler if required.
         handlers = []
         if user is not None and password is not None:
-            # Create an OpenerDirector for HTTP Digest Authentication
-            password_mgr = urllib_request.HTTPPasswordMgrWithDefaultRealm()
-            password_mgr.add_password(None, self.base_url, user, password)
-            handlers.append(urllib_request.HTTPDigestAuthHandler(password_mgr))
+            # Create a token for Json Web Token Authentication
+            self._retrieve_jwt_token(user, password)
 
         # Don't install globally to not mess with other codes.
         self._url_opener = urllib_request.build_opener(*handlers)
         if self.debug:
             print('Installed new opener with handlers: {!s}'.format(handlers))
+
+    def _retrieve_jwt_token(self, user, password):
+        """
+        Fetch token from the server using the provided user, password
+        resulting in subsequent web service requests for waveforms being
+        authenticated for potential access to restricted data.
+        :type user: str
+        :param user: User name of credentials.
+        :type password: str
+        :param password: Password for given user name.
+        """
+        # force https so that we don't send around tokens unsecurely
+        url = 'https://{}/api/token'.format(urlparse(self.base_url).netloc)
+        
+        # paranoid: check again that we only send the token to https
+        if urlparse(url).scheme != "https":
+            msg = 'This should not happen, please file a bug report.'
+            raise Exception(msg)
+
+        # convert to json
+        data = json.dumps({"username": user, "password": password})
+        # encode
+        data = bytes(data, "utf-8")
+        headers = {"Content-Type": "application/json"}
+        html = urllib_request.Request(url, data=data, headers=headers)
+        # decode('utf-8')
+        result = urllib_request.urlopen(html).read().decode("utf-8")
+        dic = json.loads(result)
+        # get token
+        self.jwt_access_token = dic['access']
+        self.jwt_refresh_token = dic['refresh']
+
+        if self.debug:
+            print('Got temporary access/refresh: {}/{}'.format(self.jwt_access_token, self.jwt_refresh_token))
+
+        return
+
+    def _validate_jwt_token(self):
+        """
+        A check if the jwt token is valid
+        """
+        # force https so that we don't send around tokens unsecurely
+        url = 'https://{}/api/token/verify'.format(urlparse(self.base_url).netloc)
+        
+        # paranoid: check again that we only send the token to https
+        if urlparse(url).scheme != "https":
+            msg = 'This should not happen, please file a bug report.'
+            raise Exception(msg)
+
+        if not self.jwt_access_token:
+            raise FDSNUnauthorizedException("Unauthorized, authentication "
+                                        "required.", )
+
+        # convert to json
+        data = json.dumps({"token": self.jwt_access_token})
+        # encode
+        data = bytes(data, "utf-8")
+        headers = {"Content-Type": "application/json"}
+        html = urllib_request.Request(url, data=data, headers=headers)
+        # decode('utf-8')
+        try:
+            result = urllib_request.urlopen(html).read().decode("utf-8")
+            dic = json.loads(result)
+            valid = not bool(dic)
+            if self.debug:
+                print('Valid token : {}'.format(valid))
+            return valid
+        except urllib_error.HTTPError as e:
+            return False
+
+    def _refresh_access_token(self):
+        """
+        Get access token from refresh token
+        """
+        # force https so that we don't send around tokens unsecurely
+        url = 'https://{}/api/token/refresh'.format(urlparse(self.base_url).netloc)
+        
+        # paranoid: check again that we only send the token to https
+        if urlparse(url).scheme != "https":
+            msg = 'This should not happen, please file a bug report.'
+            raise Exception(msg)
+
+        if not self.jwt_refresh_token:
+            raise FDSNUnauthorizedException("Unauthorized, authentication "
+                                        "required.", )
+
+        # convert to json
+        data = json.dumps({"refresh": self.jwt_refresh_token})
+        # encode
+        data = bytes(data, "utf-8")
+        headers = {"Content-Type": "application/json"}
+        html = urllib_request.Request(url, data=data, headers=headers)
+        # decode('utf-8')
+        try:
+            result = urllib_request.urlopen(html).read().decode("utf-8")
+            dic = json.loads(result)
+            self.jwt_access_token = dic['access']
+
+            if self.debug:
+                print('Got temporary access/refresh: {}/{}'.format(self.jwt_access_token, self.jwt_refresh_token))
+            
+            return
+        except:
+            raise FDSNUnauthorizedException("Unauthorized, authentication "
+                                        "expired. Please set your credentials again.", )
 
     def get_stations(self, starttime=None, endtime=None, startbefore=None,
                         startafter=None, endbefore=None, endafter=None,
@@ -219,6 +341,70 @@ class Client(object):
             inventory = read_inventory(data_stream)
             data_stream.close()
             return inventory
+
+    def get_waveforms(self, network, station, location, channel, starttime,
+                      endtime, quality=None, minimumlength=None,
+                      longestonly=None, filename=None, attach_response=False,
+                      **kwargs):
+        """
+        Query the dataselect service of the client.
+        """
+        if "dataselect" not in self.services:
+            msg = "The current client does not have a dataselect service."
+            raise ValueError(msg)
+
+        locs = locals()
+        setup_query_dict('dataselect', locs, kwargs)
+
+        # Special location handling. Convert empty strings to "--".
+        if "location" in kwargs and not kwargs["location"]:
+            kwargs["location"] = "--"
+
+        url = self._create_url_from_parameters(
+            "dataselect", DEFAULT_PARAMETERS['dataselect'], kwargs)
+        # Gzip not worth it for MiniSEED and most likely disabled for this
+        # route in any case.
+        if not self._validate_jwt_token():
+            self._refresh_access_token()
+        data_stream = self._download(url, use_gzip=False, use_jwt=self.jwt_access_token)
+        data_stream.seek(0, 0)
+        if filename:
+            self._write_to_file_object(filename, data_stream)
+            data_stream.close()
+        else:
+            st = obspy.read(data_stream, format="MSEED")
+            data_stream.close()
+            if attach_response:
+                self._attach_responses(st)
+            self._attach_dataselect_url_to_stream(st)
+            st.trim(starttime, endtime)
+            return st
+
+    def _attach_responses(self, st):
+        """
+        Helper method to fetch response via get_stations() and attach it to
+        each trace in stream.
+        """
+        netids = {}
+        for tr in st:
+            if tr.id not in netids:
+                netids[tr.id] = (tr.stats.starttime, tr.stats.endtime)
+                continue
+            netids[tr.id] = (
+                min(tr.stats.starttime, netids[tr.id][0]),
+                max(tr.stats.endtime, netids[tr.id][1]))
+
+        inventories = []
+        for key, value in netids.items():
+            net, sta, loc, chan = key.split(".")
+            starttime, endtime = value
+            try:
+                inventories.append(self.get_stations(
+                    network=net, station=sta, location=loc, channel=chan,
+                    starttime=starttime, endtime=endtime, level="response"))
+            except Exception as e:
+                warnings.warn(str(e))
+        st.attach_response(inventories)
 
     def __str__(self):
         versions = dict([(s, self._get_webservice_versionstring(s))
@@ -305,11 +491,11 @@ class Client(object):
         return self._build_url(service, "query",
                                parameters=final_parameter_set)
 
-    def _download(self, url, return_string=False, data=None, use_gzip=True):
+    def _download(self, url, return_string=False, data=None, use_gzip=True, use_jwt=None):
         code, data = download_url(
             url, opener=self._url_opener, headers=self.request_headers,
             debug=self.debug, return_string=return_string, data=data,
-            timeout=self.timeout, use_gzip=use_gzip)
+            timeout=self.timeout, use_gzip=use_gzip, use_jwt=use_jwt)
         raise_on_error(code, data)
         return data
 
@@ -362,6 +548,14 @@ class Client(object):
         """
         version = self.get_webservice_version(service)
         return ".".join(map(str, version))
+
+    def _attach_dataselect_url_to_stream(self, st):
+        """
+        Attaches the actually used dataselet URL to each Trace.
+        """
+        url = self._build_url("dataselect", "query")
+        for tr in st:
+            tr.stats._fdsnws_dataselect_url = url
 
 def convert_to_string(value):
     """
@@ -524,7 +718,7 @@ def raise_on_error(code, data):
         raise FDSNException("Unknown HTTP code: %i" % code, server_info)
 
 def download_url(url, opener, timeout=10, headers={}, debug=False,
-                 return_string=True, data=None, use_gzip=True):
+                 return_string=True, data=None, use_gzip=True, use_jwt=None):
     """
     Returns a pair of tuples.
     The first one is the returned HTTP code and the second the data as
@@ -548,6 +742,9 @@ def download_url(url, opener, timeout=10, headers={}, debug=False,
         # Request gzip encoding if desired.
         if use_gzip:
             request.add_header("Accept-encoding", "gzip")
+        if use_jwt:
+            request.add_header("accept", "application/json")
+            request.add_header("Authorization", f'JWT {use_jwt}')
 
         url_obj = opener.open(request, timeout=timeout, data=data)
     # Catch HTTP errors.
