@@ -1,5 +1,5 @@
 # TAPSClient
-A python toolbox for request data from [TAPS](https://formosa.earth.sinica.edu.tw).
+A python toolbox for request data from [TAPS](https://taps.earth.sinica.edu.tw).
 
 ## Install
 ```shell
