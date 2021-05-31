@@ -1,6 +1,11 @@
 # TAPSClient
 A python toolbox for request data from TAPS.
 
+## Install
+```shell
+pip install -r requirement.txt
+```
+
 ### get_stations
 ```python
 >>> from client import Client
