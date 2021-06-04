@@ -6,23 +6,8 @@ A python toolbox for request data from [TAPS](https://taps.earth.sinica.edu.tw).
 pip install -r requirement.txt
 ```
 
-### get_waveforms
-```python
->>> from client import Client
->>> client = Client('TAPS')
->>> user = 'user'
->>> password = 'password'
->>> client.set_credentials(user, password)
->>> from obspy import UTCDateTime
->>> t = UTCDateTime("2008-04-16T00:00:00.000")
->>> st = client.get_waveforms("TW", "NSE01", "--", "*", t, t + 60 * 60)
->>> print(st)
-1 Trace(s) in Stream:
-TW.NSE01..EHZ | 2008-04-16T00:00:00.000000Z - 2008-04-16T00:59:59.990000Z | 100.0 Hz, 360000 samples
->>> st.plot(outfile='singlechannel.png')
-```
-
 ### get_stations
+ref: [obspy.clients.fdsn - FDSN web service client for ObsPy](https://docs.obspy.org/packages/obspy.clients.fdsn.html#obspy-clients-fdsn-fdsn-web-service-client-for-obspy)
 ```python
 >>> from client import Client
 >>> client = Client('TAPS')
@@ -183,4 +168,30 @@ Channel Response
                 Stage 1: PolesZerosResponseStage from m/s to V, gain: 400.407
                 Stage 2: CoefficientsTypeResponseStage from V to counts, gain: 512000
 >>>
+```
+
+### get_waveforms
+```python
+>>> from client import Client
+>>> client = Client('TAPS')
+>>> user = 'user'
+>>> password = 'password'
+>>> client.set_credentials(user, password)
+>>> from obspy import UTCDateTime
+>>> t = UTCDateTime("2008-04-16T00:00:00.000")
+>>> st = client.get_waveforms("TW", "NSE01", "--", "*", t, t + 60 * 60)
+>>> print(st)
+1 Trace(s) in Stream:
+TW.NSE01..EHZ | 2008-04-16T00:00:00.000000Z - 2008-04-16T00:59:59.990000Z | 100.0 Hz, 360000 samples
+>>> st.plot(outfile='singlechannel.png')
+```
+
+### Remove response
+ref: [obspy.core.trace.Trace.remove_response](https://docs.obspy.org/packages/autogen/obspy.core.trace.Trace.remove_response.html#obspy-core-trace-trace-remove-response)
+```python
+>>> tr = st[0]
+>>> pre_filt = [0.001, 0.005, 45, 50]
+>>> tr.remove_response(inventory=inv, pre_filt=pre_filt, output="DISP",
+                   water_level=60, plot='outfile.png')
+<...Trace object at 0x...>
 ```
